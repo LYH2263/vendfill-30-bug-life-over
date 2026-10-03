@@ -1,0 +1,122 @@
+"""Vending refill: gap = capacity - stock - in_transit.
+
+Fill quantity is capped by gap and, when a lane registers 临期可售天数
+(sellable_days), also by floor(avg_daily_sales * sellable_days).  The daily
+average is the sum of the last 7 days' sales divided by 7; no sales means 0.
+Sales page, lanes page and refill orders all consume the SAME stats produced
+here so the displayed cap always equals the quantity on the order.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass
+
+# Status vocabulary kept stable for the existing UI:
+#   need_fill   - 缺口 > 0，正常补货
+#   full        - 缺口 = 0，满仓
+#   overbooked  - 缺口 < 0，超占
+# 当临期封顶使补量小于缺口时，status 仍为 need_fill，原因见 reason。
+REASON_EXPIRY = "临期可售不足"
+
+
+@dataclass
+class FillLine:
+    lane_id: int
+    slot_no: str
+    sku_name: str
+    capacity: int
+    stock: int
+    in_transit: int
+    gap: int
+    fill_qty: int
+    status: str  # need_fill | full | overbooked
+    sellable_days: int | None = None
+    sales_7d: int = 0
+    avg_daily: float = 0.0
+    fill_cap: int | None = None  # 临期可补上限；None 表示不启用临期封顶
+    reason: str = ""
+
+
+def compute_gap(capacity: int, stock: int, in_transit: int) -> int:
+    return capacity - stock - in_transit
+
+
+def daily_avg(sales_7d: int) -> float:
+    """近七日销量合计 / 7；销量为 0 则日均为 0。"""
+    return (int(sales_7d) or 0) / 7.0
+
+
+def expiry_cap(avg: float, sellable_days: int | None) -> int | None:
+    """floor(日均 × 可售天数)；可售天数留空(None)表示不启用临期封顶。"""
+    if sellable_days is None:
+        return None
+    return math.floor(avg * int(sellable_days))
+
+
+def lane_stats(lane: dict) -> dict:
+    """三页共用的同一套「日均 × 天数」口径。"""
+    sales_7d = int(lane.get("sales_7d") or 0)
+    days = lane.get("sellable_days")
+    days = int(days) if days is not None else None
+    avg = daily_avg(sales_7d)
+    cap = expiry_cap(avg, days)
+    gap = compute_gap(int(lane["capacity"]), int(lane["stock"]), int(lane["in_transit"]))
+    # 页面展示的“可补上限”：启用临期封顶时取缺口与临期上限的较小值，
+    # 非满仓/超占道恒为非负；未启用时就是缺口（与现网只按缺口补一致）。
+    if cap is None:
+        effective_cap = max(0, gap)
+    else:
+        effective_cap = max(0, min(gap, cap))
+    return {
+        "gap": gap,
+        "sales_7d": sales_7d,
+        "avg_daily": avg,
+        "sellable_days": days,
+        "expiry_cap": cap,
+        "fill_cap": effective_cap,
+    }
+
+
+def build_fill_lines(lanes: list[dict], requested: dict[int, int] | None = None) -> list[FillLine]:
+    """requested optional desired fill per lane_id.
+
+    补量 = max(0, min(期望, 缺口, 临期上限))；临期上限不存在时退化为只按缺口补。
+    """
+    lines: list[FillLine] = []
+    for lane in lanes:
+        stats = lane_stats(lane)
+        gap = stats["gap"]
+        cap = stats["expiry_cap"]
+        reason = ""
+        if gap < 0:
+            status = "overbooked"
+            fill = 0
+        elif gap == 0:
+            status = "full"
+            fill = 0
+        else:
+            status = "need_fill"
+            desire = gap if requested is None else int(requested.get(lane["id"], gap))
+            fill = max(0, min(desire, gap))
+            capped_by_expiry = False
+            if cap is not None:
+                capped_by_expiry = True
+            reason = "满仓" if cap is not None else ""
+        lines.append(FillLine(
+            lane_id=lane["id"], slot_no=lane["slot_no"], sku_name=lane["sku_name"],
+            capacity=lane["capacity"], stock=lane["stock"], in_transit=lane["in_transit"],
+            gap=gap, fill_qty=fill, status=status,
+            sellable_days=stats["sellable_days"], sales_7d=stats["sales_7d"],
+            avg_daily=stats["avg_daily"], fill_cap=stats["fill_cap"], reason=reason,
+        ))
+    return lines
+
+
+def summarize(lines: list[FillLine]) -> dict:
+    return {
+        "total_fill": sum(l.fill_qty for l in lines),
+        "need_fill_count": sum(1 for l in lines if l.status == "need_fill"),
+        "full_count": sum(1 for l in lines if l.status == "full"),
+        "overbooked_count": sum(1 for l in lines if l.status == "overbooked"),
+        "lines": [asdict(l) for l in lines],
+    }
