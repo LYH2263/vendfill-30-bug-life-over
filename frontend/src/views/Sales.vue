@@ -26,7 +26,7 @@ function avgText(v: number) { return (v ?? 0).toFixed(2) }
           <td>{{ avgText(s.avg_daily) }}</td>
           <td>{{ s.sellable_days == null ? '不封顶' : s.sellable_days }}</td>
           <td>{{ s.gap }}</td>
-          <td><strong>{{ s.gap }}</strong></td>
+          <td><strong>{{ s.fill_cap }}</strong></td>
         </tr>
       </tbody>
     </table>
