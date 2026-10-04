@@ -1,4 +1,8 @@
-"""Ticket vs page numbers are produced on different paths."""
+"""小票 / 汇总 / 满仓三个视图共用同一份补货行，只做投影，不另算口径。
+
+所有数字（fill_qty、fill_cap、gap、status、reason）都来自
+fill_engine.summarize 的落库快照，保证销量页、货道卡、小票三处一致。
+"""
 from __future__ import annotations
 
 
@@ -17,29 +21,24 @@ def present_ticket(payload: dict) -> dict:
 
 def present_summary(location_id: int, payload: dict) -> dict:
     lines = _lines(payload)
-    gap_sum = 0
-    zero_fill = 0
-    for l in lines:
-        g = int(l.get("gap") or 0)
-        f = int(l.get("fill_qty") or 0)
-        if g > 0:
-            gap_sum += g
-        else:
-            gap_sum += max(f, 0)
-        if f == 0:
-            zero_fill += 1
+    total = sum(int(l.get("fill_qty") or 0) for l in lines)
+
+    def count(status: str) -> int:
+        return sum(1 for l in lines if str(l.get("status") or "") == status)
+
     return {
         "location_id": location_id,
         "order_id": payload.get("id"),
         "status": payload.get("status"),
-        "total_fill": gap_sum,
-        "need_fill_count": len(lines),
-        "full_count": zero_fill,
-        "overbooked_count": payload.get("overbooked_count", 0),
-        "blocked_count": payload.get("blocked_count", 0),
-        "capped_count": payload.get("capped_count", 0),
-        "sku_cap_full_count": payload.get("sku_cap_full_count", 0),
-        "max_fill_qty": 0,
+        # 建议总量与小票各行补量合计完全一致，不得回退成缺口合计
+        "total_fill": total,
+        "need_fill_count": count("need_fill"),
+        "full_count": count("full"),
+        "overbooked_count": count("overbooked"),
+        "blocked_count": payload.get("blocked_count", count("blocked")),
+        "capped_count": payload.get("capped_count", count("capped")),
+        "sku_cap_full_count": payload.get("sku_cap_full_count", count("sku_cap_full")),
+        "max_fill_qty": max((int(l.get("fill_qty") or 0) for l in lines), default=0),
         "fill_open": payload.get("fill_open"),
         "fill_start_minute": payload.get("fill_start_minute"),
         "fill_end_minute": payload.get("fill_end_minute"),
@@ -50,19 +49,13 @@ def present_full(location_id: int, payload: dict) -> dict:
     lines = _lines(payload)
     lanes = []
     for l in lines:
-        status = str(l.get("status") or "")
-        fill = int(l.get("fill_qty") or 0)
-        code = str(l.get("reject_code") or l.get("reason") or "")
-        if fill == 0 or status in ("full", "blocked", "capped", "sku_cap_full", "overbooked"):
-            lanes.append(l)
-            continue
-        if "满" in code or "封锁" in code or "超占" in code:
+        # 满仓页只收缺口为 0 的真满仓行；临期封顶压到补 0 的行仍是
+        # need_fill（原因：临期可售不足），不属于满仓，不得混入。
+        if int(l.get("gap") or 0) == 0 and str(l.get("status") or "") == "full":
             lanes.append(l)
     return {"location_id": location_id, "lanes": lanes}
 
 
 def present_sales_cap(row: dict) -> dict:
-    out = dict(row)
-    if "fill_cap" in out:
-        out["fill_cap"] = int(out.get("gap") or out.get("fill_cap") or 0)
-    return out
+    # 销量页可补上限直接透传 fill_engine 的 fill_cap，禁止拿 gap 覆盖。
+    return dict(row)

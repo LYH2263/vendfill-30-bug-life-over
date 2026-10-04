@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -9,8 +9,17 @@ router = APIRouter(prefix="/lanes", tags=["lanes"])
 
 
 class LaneUpdate(BaseModel):
-    # None / 缺省 = 留空，不启用临期封顶；≤0 拒绝保存
-    sellable_days: int | None = None
+    # None / 缺省 = 留空，不启用临期封顶。
+    # StrictInt 拒绝 bool、浮点、字符串等一切非纯 int 输入，
+    # 再由路由统一拒绝 ≤0：非法值不落库，页面/货道卡/小票停在改前。
+    sellable_days: StrictInt | None = None
+
+    @field_validator("sellable_days")
+    @classmethod
+    def _positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("临期可售天数必须大于 0；留空表示不启用临期封顶")
+        return v
 
 
 def _serialize(r: Lane, sales_map: dict[int, int]) -> dict:
@@ -32,8 +41,8 @@ def update_lane(lane_id: int, body: LaneUpdate, db: Session = Depends(get_db)):
     if not lane:
         raise HTTPException(404, "货道不存在")
     days = body.sellable_days
+    # 双保险：校验先于落库（模型已拦非整数/≤0），拒绝时一切保持改前
     if days is not None and days <= 0:
-        # 校验先于落库：拒绝保存，库存/可售天数等一切保持改前
         raise HTTPException(400, "临期可售天数必须大于 0；留空表示不启用临期封顶")
     lane.sellable_days = days
     db.commit(); db.refresh(lane)

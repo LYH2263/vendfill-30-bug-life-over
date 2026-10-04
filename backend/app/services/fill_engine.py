@@ -81,12 +81,15 @@ def build_fill_lines(lanes: list[dict], requested: dict[int, int] | None = None)
     """requested optional desired fill per lane_id.
 
     补量 = max(0, min(期望, 缺口, 临期上限))；临期上限不存在时退化为只按缺口补。
+    小票补量与三页展示的 fill_cap 同源：requested 缺省（现场生成补货单）时
+    fill_qty 恒等于 fill_cap，谁更紧当场取谁，禁止页上压了票上仍满补。
     """
     lines: list[FillLine] = []
     for lane in lanes:
         stats = lane_stats(lane)
         gap = stats["gap"]
         cap = stats["expiry_cap"]
+        fill_cap = stats["fill_cap"]
         reason = ""
         if gap < 0:
             status = "overbooked"
@@ -97,17 +100,18 @@ def build_fill_lines(lanes: list[dict], requested: dict[int, int] | None = None)
         else:
             status = "need_fill"
             desire = gap if requested is None else int(requested.get(lane["id"], gap))
-            fill = max(0, min(desire, gap))
-            capped_by_expiry = False
-            if cap is not None:
-                capped_by_expiry = True
-            reason = "满仓" if cap is not None else ""
+            # fill_cap 已是 max(0, min(缺口, 临期上限))，再被期望量收窄
+            fill = max(0, min(desire, fill_cap))
+            # 仅当临期上限真的比缺口更紧时才说明临期；缺口更紧（cap >= gap）
+            # 时按缺口补，不写任何临期/满仓原因。
+            if cap is not None and cap < gap:
+                reason = REASON_EXPIRY
         lines.append(FillLine(
             lane_id=lane["id"], slot_no=lane["slot_no"], sku_name=lane["sku_name"],
             capacity=lane["capacity"], stock=lane["stock"], in_transit=lane["in_transit"],
             gap=gap, fill_qty=fill, status=status,
             sellable_days=stats["sellable_days"], sales_7d=stats["sales_7d"],
-            avg_daily=stats["avg_daily"], fill_cap=stats["fill_cap"], reason=reason,
+            avg_daily=stats["avg_daily"], fill_cap=fill_cap, reason=reason,
         ))
     return lines
 

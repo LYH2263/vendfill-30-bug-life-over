@@ -5,7 +5,7 @@ const s = ref<any>({})
 const ticketTotal = ref(0)
 onMounted(async () => { s.value = await api('/refills/summary?location_id=1')
   const ticket = await api('/refills/latest?location_id=1')
-  ticketTotal.value = (ticket.lines || []).reduce((n: number, l: any) => n + Number(l.gap || 0), 0) })
+  ticketTotal.value = (ticket.lines || []).reduce((n: number, l: any) => n + Number(l.fill_qty || 0), 0) })
 </script>
 <template>
   <h1>汇总</h1>
